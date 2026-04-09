@@ -1,5 +1,6 @@
 # main.py — Mini NPU Simulator
 
+import json  # data.json 로드용
 import time  # 연산 시간 측정용
 from typing import List  # Python 3.8 호환성 지원을 위해 사용 (3.9+에서는 내장 list로 대체 가능)
 
@@ -144,6 +145,170 @@ def measure_mac_time(
     return avg_ms
 
 
+# === Phase 4: 모드 2 — JSON 데이터 분석 ===
+
+
+def load_json(filepath: str) -> dict:
+    """JSON 파일을 읽어서 파싱된 딕셔너리를 반환한다.
+
+    파일 없음/파싱 에러 시 에러 메시지를 출력하고 빈 딕셔너리를 반환한다.
+    """
+    try:
+        with open(filepath, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except FileNotFoundError:
+        print(f"오류: '{filepath}' 파일을 찾을 수 없습니다.")
+        return {}
+    except json.JSONDecodeError:
+        print(f"오류: '{filepath}' 파일의 JSON 형식이 올바르지 않습니다.")
+        return {}
+
+
+def parse_pattern_key(key: str) -> int:
+    """패턴 키 'size_{N}_{idx}'에서 N 값을 추출하여 반환한다.
+
+    파싱 실패 시 -1을 반환한다.
+    """
+    try:
+        parts = key.split("_")
+        return int(parts[1])
+    except (IndexError, ValueError):
+        return -1
+
+
+def validate_grid_size(grid: List[List[float]], expected_n: int) -> bool:
+    """2D 배열이 expected_n x expected_n 크기인지 검증한다."""
+    if len(grid) != expected_n:
+        return False
+    for row in grid:
+        if len(row) != expected_n:
+            return False
+    return True
+
+
+def analyze_pattern(pattern_key: str, pattern_data: dict, filters: dict) -> dict:
+    """단일 패턴에 대한 전체 분석을 수행한다.
+
+    키 파싱 → 필터 선택 → expected 정규화 → 크기 검증 → MAC 연산 → 점수 비교 → PASS/FAIL.
+    크기 검증 실패 등 오류 시 MAC 연산 없이 즉시 FAIL 결과를 반환한다.
+    """
+    # 기본 결과 구조 (오류 시 이 상태로 반환)
+    result = {
+        "key": pattern_key,
+        "cross_score": None,
+        "x_score": None,
+        "verdict": None,
+        "expected": "",
+        "result": "FAIL",
+        "fail_reason": "",
+    }
+
+    # 1. 패턴 키에서 N 추출
+    n = parse_pattern_key(pattern_key)
+    if n < 0:
+        result["fail_reason"] = "키 파싱 실패"
+        return result
+
+    # 2. 해당 크기의 필터 선택
+    filter_key = f"size_{n}"
+    if filter_key not in filters:
+        result["fail_reason"] = f"필터 없음 ({filter_key})"
+        return result
+
+    # 3. expected 라벨 정규화
+    raw_expected = pattern_data.get("expected", "")
+    result["expected"] = normalize_label(raw_expected)
+
+    # 4. 입력 배열 크기 검증
+    input_grid = pattern_data.get("input", [])
+    if not validate_grid_size(input_grid, n):
+        actual_rows = len(input_grid)
+        actual_cols = len(input_grid[0]) if input_grid else 0
+        result["fail_reason"] = (
+            f"크기 불일치 (필터: {n}x{n}, 입력: {actual_rows}x{actual_cols})"
+        )
+        return result
+
+    # 5. Cross/X 필터로 MAC 연산 수행
+    cross_filter = filters[filter_key]["cross"]
+    x_filter = filters[filter_key]["x"]
+    result["cross_score"] = mac_operation(cross_filter, input_grid)
+    result["x_score"] = mac_operation(x_filter, input_grid)
+
+    # 6. 점수 비교 → 판정
+    result["verdict"] = compare_scores(result["cross_score"], result["x_score"])
+
+    # 7. PASS/FAIL 판정
+    result["result"] = judge_result(result["verdict"], result["expected"])
+
+    # FAIL 사유 기록
+    if result["result"] == "FAIL":
+        if result["verdict"] == "UNDECIDED":
+            result["fail_reason"] = "동점(UNDECIDED)"
+        else:
+            result["fail_reason"] = (
+                f"판정({result['verdict']}) != expected({result['expected']})"
+            )
+
+    return result
+
+
+def run_mode_2() -> None:
+    """모드 2 전체 실행 흐름: JSON 로드 → 필터 확인 → 패턴 분석 → 결과 출력."""
+    # [0] JSON 로드
+    data = load_json("data.json")
+    if not data:
+        return
+    filters = data.get("filters", {})
+    patterns = data.get("patterns", {})
+
+    # [1] 필터 로드 출력
+    print()
+    print("#----------------------------------------")
+    print("# [1] 필터 로드")
+    print("#----------------------------------------")
+    filter_order = ["size_5", "size_13", "size_25"]
+    for filter_key in filter_order:
+        if filter_key in filters:
+            # 필터의 sub-key를 정규화하여 표시 (cross → Cross, x → X)
+            labels = []
+            for sub_key in filters[filter_key]:
+                labels.append(normalize_label(sub_key))
+            label_str = ", ".join(labels)
+            print(f"✓ {filter_key:<7} 필터 로드 완료 ({label_str})")
+
+    # [2] 패턴 분석
+    print()
+    print("#----------------------------------------")
+    print("# [2] 패턴 분석 (라벨 정규화 적용)")
+    print("#----------------------------------------")
+    results = []
+    for pattern_key in patterns:
+        result = analyze_pattern(pattern_key, patterns[pattern_key], filters)
+        results.append(result)
+
+        print(f"--- {pattern_key} ---")
+        if result["cross_score"] is None:
+            # 크기 불일치 등 MAC 연산 전에 실패한 케이스
+            print(f"판정: FAIL ({result['fail_reason']})")
+        else:
+            print(f"Cross 점수: {result['cross_score']}")
+            print(f"X 점수: {result['x_score']}")
+            if result["result"] == "FAIL" and result["fail_reason"]:
+                print(
+                    f"판정: {result['verdict']} | "
+                    f"expected: {result['expected']} | "
+                    f"{result['result']} ({result['fail_reason']})"
+                )
+            else:
+                print(
+                    f"판정: {result['verdict']} | "
+                    f"expected: {result['expected']} | "
+                    f"{result['result']}"
+                )
+        print()
+
+
 def show_menu() -> str:
     """모드 선택 메뉴를 출력하고 유효한 선택('1' 또는 '2')을 반환한다."""
     print("=== Mini NPU Simulator ===")
@@ -219,4 +384,4 @@ if __name__ == "__main__":
     if choice == "1":
         run_mode_1()
     elif choice == "2":
-        print("모드 2는 아직 구현되지 않았습니다.")
+        run_mode_2()
