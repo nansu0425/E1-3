@@ -278,6 +278,124 @@ def analyze_pattern(pattern_key: str, pattern_data: dict, filters: dict) -> dict
     return result
 
 
+# === Phase 6: 보너스 — 패턴 생성기 및 1D 메모리 최적화 ===
+
+
+def generate_cross_pattern(n: int) -> List[List[float]]:
+    """N×N Cross 패턴을 자동 생성한다.
+
+    가운데 행(n // 2)과 가운데 열(n // 2)만 1.0으로 채우고 나머지는 0.0이다.
+    홀수 N(3/5/13/25)을 가정한 단일 중심 정의이며, 짝수 N도 정의는 동작한다.
+    """
+    grid = create_grid(n, 0.0)
+    center = n // 2
+    for i in range(n):
+        grid[center][i] = 1.0  # 가운데 행
+        grid[i][center] = 1.0  # 가운데 열
+    return grid
+
+
+def generate_x_pattern(n: int) -> List[List[float]]:
+    """N×N X 패턴을 자동 생성한다.
+
+    두 대각선 (i, i)와 (i, n-1-i)만 1.0으로 채운다. 홀수 N에서는 중심에서
+    두 대각선이 겹치지만 같은 값(1.0)이므로 별도 처리는 필요 없다.
+    """
+    grid = create_grid(n, 0.0)
+    for i in range(n):
+        grid[i][i] = 1.0           # 좌상→우하 대각선
+        grid[i][n - 1 - i] = 1.0   # 우상→좌하 대각선
+    return grid
+
+
+def to_1d(grid: List[List[float]]) -> List[float]:
+    """N×N 2D 배열을 행 우선(row-major) 순서로 길이 N²인 1D 배열로 변환한다."""
+    flat = []
+    for row in grid:
+        for value in row:
+            flat.append(value)
+    return flat
+
+
+def mac_operation_1d(flat_a: List[float], flat_b: List[float]) -> float:
+    """길이 N²인 두 1D 배열에 대한 MAC 연산을 수행한다.
+
+    인덱스 한 번으로 곱셈·누적이 끝나므로 2D보다 메모리 접근이 단순하다.
+    동일 입력에 대해 mac_operation()과 같은 결과를 반환해야 한다.
+    """
+    result = 0.0
+    for i in range(len(flat_a)):
+        result += flat_a[i] * flat_b[i]
+    return result
+
+
+def measure_mac_1d_time(flat: List[float], repeat: int = 10) -> float:
+    """1D MAC 연산을 repeat회 반복 실행하고 평균 시간을 ms 단위로 반환한다."""
+    start = time.perf_counter()
+    for _ in range(repeat):
+        mac_operation_1d(flat, flat)
+    end = time.perf_counter()
+    return (end - start) / repeat * 1000
+
+
+def run_memory_optimization_comparison(filters: dict, repeat: int = 10) -> None:
+    """4개 크기에 대해 2D vs 1D MAC 연산 평균 시간 비교 표를 출력한다.
+
+    5/13/25는 data.json의 Cross 필터를 그대로 사용하고, 3×3은 data.json에
+    없으므로 generate_cross_pattern(3)으로 자체 생성한다(생성기 재활용).
+    각 크기마다 2D 결과와 1D 결과가 epsilon 이내로 일치하는지 검증한다.
+    """
+    sizes = [3, 5, 13, 25]
+    col1_w = 5
+    col2_w = 9   # "2D ms" / 데이터 폭 기준
+    col3_w = 9   # "1D ms"
+    col4_w = 11  # "비율(2D/1D)"
+
+    print("#----------------------------------------")
+    print("# [3-2] 메모리 최적화 비교 (2D vs 1D)")
+    print("#----------------------------------------")
+    print(
+        f"| {pad_visual('크기', col1_w)} | {pad_visual('2D ms', col2_w)} "
+        f"| {pad_visual('1D ms', col3_w)} | {pad_visual('비율(2D/1D)', col4_w)} |"
+    )
+    print(f"| {'-' * col1_w} | {'-' * col2_w} | {'-' * col3_w} | {'-' * col4_w} |")
+
+    for n in sizes:
+        filter_key = f"size_{n}"
+        if n != 3 and filter_key in filters and "cross" in filters[filter_key]:
+            grid = filters[filter_key]["cross"]
+        else:
+            # 3×3은 data.json에 없으므로 생성기로 충당한다(R37 충족).
+            grid = generate_cross_pattern(3)
+
+        flat = to_1d(grid)
+
+        # 결과 일치 검증: 1D 결과가 2D 결과와 epsilon 이내인지 확인
+        score_2d = mac_operation(grid, grid)
+        score_1d = mac_operation_1d(flat, flat)
+        if abs(score_2d - score_1d) >= EPSILON:
+            print(
+                f"  ⚠ 경고: {n}×{n} 1D 결과 불일치 (2D={score_2d}, 1D={score_1d})"
+            )
+
+        avg_2d_ms = measure_mac_time(grid, grid, repeat=repeat)
+        avg_1d_ms = measure_mac_1d_time(flat, repeat=repeat)
+        # 비율은 0 분모 방어
+        if avg_1d_ms > 0:
+            ratio_str = f"{avg_2d_ms / avg_1d_ms:.2f}"
+        else:
+            ratio_str = "N/A"
+
+        size_label = f"{n}×{n}"
+        print(
+            f"| {pad_visual(size_label, col1_w)} "
+            f"| {pad_visual(f'{avg_2d_ms:.3f}', col2_w)} "
+            f"| {pad_visual(f'{avg_1d_ms:.3f}', col3_w)} "
+            f"| {pad_visual(ratio_str, col4_w)} |"
+        )
+    print()
+
+
 def run_performance_analysis(filters: dict, repeat: int = 10) -> None:
     """4개 크기(3×3, 5×5, 13×13, 25×25)에 대한 MAC 연산 성능 분석 표를 출력한다.
 
@@ -391,6 +509,9 @@ def run_mode_2() -> None:
     # [3] 성능 분석
     run_performance_analysis(filters)
 
+    # [3-2] 메모리 최적화 비교 (2D vs 1D)
+    run_memory_optimization_comparison(filters)
+
     # [4] 결과 요약
     print_summary(results)
 
@@ -410,23 +531,78 @@ def show_menu() -> str:
         print("올바른 번호를 입력하세요 (1 또는 2).")
 
 
+def choose_input_mode() -> str:
+    """모드 1의 입력 방식을 선택한다: '1' 직접 입력, '2' 자동 생성."""
+    print()
+    print("[입력 방식 선택]")
+    print("1. 직접 입력")
+    print("2. 자동 생성 패턴 사용 (Cross / X)")
+    while True:
+        choice = input("선택: ").strip()
+        if choice in ("1", "2"):
+            return choice
+        print("올바른 번호를 입력하세요 (1 또는 2).")
+
+
+def choose_pattern_label() -> str:
+    """자동 생성에서 어떤 패턴을 만들지 선택한다: 'cross' 또는 'x'."""
+    print()
+    print("[자동 생성 패턴 선택]")
+    print("1. Cross")
+    print("2. X")
+    while True:
+        choice = input("선택: ").strip()
+        if choice == "1":
+            return "cross"
+        if choice == "2":
+            return "x"
+        print("올바른 번호를 입력하세요 (1 또는 2).")
+
+
 def run_mode_1() -> None:
     """모드 1 전체 실행 흐름: 필터 입력 → 패턴 입력 → MAC 연산 → 결과 출력."""
-    # [1] 필터 입력
+    input_mode = choose_input_mode()
+
+    # [1] 필터 입력 / 자동 생성
     print()
     print("#----------------------------------------")
     print("# [1] 필터 입력")
     print("#----------------------------------------")
-    filter_a = input_grid(3, "필터 A")
-    print()
-    filter_b = input_grid(3, "필터 B")
+    if input_mode == "2":
+        # 자동 생성: A=Cross, B=X 로 고정 (학습용 표준 구성)
+        filter_a = generate_cross_pattern(3)
+        filter_b = generate_x_pattern(3)
+        print("필터 A: Cross (자동 생성)")
+        for row in filter_a:
+            print("  " + " ".join(f"{v:.1f}" for v in row))
+        print()
+        print("필터 B: X (자동 생성)")
+        for row in filter_b:
+            print("  " + " ".join(f"{v:.1f}" for v in row))
+    else:
+        filter_a = input_grid(3, "필터 A")
+        print()
+        filter_b = input_grid(3, "필터 B")
 
-    # [2] 패턴 입력
+    # [2] 패턴 입력 / 자동 생성
     print()
     print("#----------------------------------------")
     print("# [2] 패턴 입력")
     print("#----------------------------------------")
-    pattern = input_grid(3, "패턴")
+    if input_mode == "2":
+        label = choose_pattern_label()
+        if label == "cross":
+            pattern = generate_cross_pattern(3)
+            print()
+            print("패턴: Cross (자동 생성)")
+        else:
+            pattern = generate_x_pattern(3)
+            print()
+            print("패턴: X (자동 생성)")
+        for row in pattern:
+            print("  " + " ".join(f"{v:.1f}" for v in row))
+    else:
+        pattern = input_grid(3, "패턴")
 
     # MAC 연산 수행
     score_a = mac_operation(filter_a, pattern)
