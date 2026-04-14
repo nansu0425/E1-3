@@ -2,7 +2,32 @@
 
 import json  # data.json 로드용
 import time  # 연산 시간 측정용
+import unicodedata  # 표 열 정렬용 — 한글 등 CJK 문자는 터미널에서 2셀 폭을 차지하므로 시각 폭 계산에 사용
 from typing import List  # Python 3.8 호환성 지원을 위해 사용 (3.9+에서는 내장 list로 대체 가능)
+
+
+def visual_width(text: str) -> int:
+    """문자열이 모노스페이스 터미널에서 차지하는 셀 수를 반환한다.
+
+    파이썬 len()은 문자 수만 세므로 한글('크') 같은 CJK 문자가 포함되면
+    셀 폭(2)과 어긋나 표가 삐뚤어진다. east_asian_width가 W/F인 문자는 2셀,
+    그 외는 1셀로 계산한다.
+    """
+    width = 0
+    for ch in text:
+        if unicodedata.east_asian_width(ch) in ("W", "F"):
+            width += 2
+        else:
+            width += 1
+    return width
+
+
+def pad_visual(text: str, width: int) -> str:
+    """시각 폭 기준으로 문자열을 좌측 정렬 패딩한다."""
+    pad = width - visual_width(text)
+    if pad <= 0:
+        return text
+    return text + " " * pad
 
 EPSILON = 1e-9  # 부동소수점 비교 허용 오차
 
@@ -253,6 +278,61 @@ def analyze_pattern(pattern_key: str, pattern_data: dict, filters: dict) -> dict
     return result
 
 
+def run_performance_analysis(filters: dict, repeat: int = 10) -> None:
+    """4개 크기(3×3, 5×5, 13×13, 25×25)에 대한 MAC 연산 성능 분석 표를 출력한다.
+
+    5/13/25는 data.json의 Cross 필터를 그대로 사용하고, 3×3은 data.json에
+    없으므로 create_grid(3, 1.0)로 자체 생성한다. 측정 대상은 시간이므로
+    격자의 값 자체는 결과에 영향을 주지 않는다.
+    """
+    sizes = [3, 5, 13, 25]
+    # 열 폭은 헤더(한글)의 시각 폭과 데이터 최대 폭 중 큰 값을 기준으로 둔다.
+    col1_w = 5   # "크기"(4셀) vs "25×25"(5셀)
+    col2_w = 13  # "평균 시간(ms)"(13셀) 기준
+    col3_w = 9   # "연산 횟수"(9셀) 기준
+
+    print("#----------------------------------------")
+    print("# [3] 성능 분석")
+    print("#----------------------------------------")
+    print(f"| {pad_visual('크기', col1_w)} | {pad_visual('평균 시간(ms)', col2_w)} | {pad_visual('연산 횟수', col3_w)} |")
+    print(f"| {'-' * col1_w} | {'-' * col2_w} | {'-' * col3_w} |")
+
+    for n in sizes:
+        filter_key = f"size_{n}"
+        if n != 3 and filter_key in filters and "cross" in filters[filter_key]:
+            grid = filters[filter_key]["cross"]
+        else:
+            # 3×3은 data.json에 없으므로 동일 크기 측정용 격자를 생성한다.
+            grid = create_grid(n, 1.0)
+
+        avg_ms = measure_mac_time(grid, grid, repeat=repeat)
+        op_count = n * n
+        size_label = f"{n}×{n}"
+        print(f"| {pad_visual(size_label, col1_w)} | {pad_visual(f'{avg_ms:.3f}', col2_w)} | {pad_visual(str(op_count), col3_w)} |")
+    print()
+
+
+def print_summary(results: List[dict]) -> None:
+    """모드 2 분석 결과 목록을 받아 총/통과/실패 요약과 실패 케이스를 출력한다."""
+    total = len(results)
+    passed = sum(1 for r in results if r["result"] == "PASS")
+    failed = total - passed
+
+    print("#----------------------------------------")
+    print("# [4] 결과 요약")
+    print("#----------------------------------------")
+    print(f"총 테스트: {total}개")
+    print(f"통과: {passed}개")
+    print(f"실패: {failed}개")
+
+    if failed > 0:
+        print()
+        print("실패 케이스:")
+        for r in results:
+            if r["result"] == "FAIL":
+                print(f"- {r['key']}: {r['fail_reason']}")
+
+
 def run_mode_2() -> None:
     """모드 2 전체 실행 흐름: JSON 로드 → 필터 확인 → 패턴 분석 → 결과 출력."""
     # [0] JSON 로드
@@ -307,6 +387,12 @@ def run_mode_2() -> None:
                     f"{result['result']}"
                 )
         print()
+
+    # [3] 성능 분석
+    run_performance_analysis(filters)
+
+    # [4] 결과 요약
+    print_summary(results)
 
 
 def show_menu() -> str:
@@ -376,6 +462,7 @@ def run_mode_1() -> None:
         print(f"A 점수: {score_a}")
         print(f"B 점수: {score_b}")
         print(f"연산 시간(평균/{repeat}회): {avg_time_ms:.3f} ms")
+        print(f"연산 횟수: {3 * 3} (3×3)")
         print(f"판정: {verdict}")
 
 
